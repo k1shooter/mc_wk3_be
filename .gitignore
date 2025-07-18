@@ -1,0 +1,34 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+outputs/
+uploads/
+# 모델 및 데이터
+pretrained_models/
+*.h5
+*.pt
+*.pkl
+*.ckpt
+*.onnx
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
