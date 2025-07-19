@@ -13,6 +13,15 @@ import psycopg2
 import librosa
 import numpy as np
 import shutil
+import tempfile
+import psola
+import soundfile as sf
+from flask_cors import CORS, cross_origin
+
+app=Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins" : "*"}})
+app.debug=True
+
 #유튜브 영상 다운(지정 폴더 안에 mp3 형식으로로)
 def download_audio_with_ytdlp(youtube_url, filename, folder):
     ydl_opts = {
@@ -64,14 +73,11 @@ def analyze_audio(audio_path):
         # "tempo_bpm": tempo
     }
 
-app=Flask(__name__)
-app.debug=True
 
 @app.route("/")
 def index():
     return "hello"
 
-app = Flask(__name__)
 
 def get_conn():
     return psycopg2.connect(
@@ -92,6 +98,7 @@ separator = Separator('spleeter:2stems')
 
 
 @app.route('/accompaniment', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def accompaniment_only():
     if 'audio' not in request.files:
         return jsonify({'error': 'No audio file provided'}), 400
@@ -465,6 +472,103 @@ def add_user():
     cur.close()
     conn.close()
     return jsonify(result)
+
+@app.route('/add_echo', methods=['POST'])
+def add_echo():
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
+    file = request.files['audio']
+
+    # 숫자 파라미터 가져오기 (없으면 기본값)
+    try:
+        delay_ms = int(request.form.get("delay", 250))      # ms
+        repeat = int(request.form.get("repeat", 3))         # 횟수
+        decay = float(request.form.get("decay", 0.5))       # 0~1
+    except Exception as e:
+        return jsonify({'error': 'Invalid parameter type'}), 400
+
+    # 임시폴더에 파일 저장
+    tmpdir = tempfile.mkdtemp()
+    input_path = os.path.join(tmpdir, "input.mp3")
+    file.save(input_path)
+
+    # 오디오 로드
+    audio = AudioSegment.from_file(input_path)
+
+    # 에코 믹스
+    output = audio
+    for i in range(1, repeat+1):
+        # 감쇠(dB) 계산: decay=0.5-> -6dB, decay=0.8-> -1.9dB
+        attenuation = 20 * (i) * (0 if decay == 1 else np.log10(decay))
+        echo = audio.apply_gain(attenuation)
+        # 지연시킨 후 overlay
+        echo = AudioSegment.silent(duration=delay_ms * i) + echo
+        output = output.overlay(echo)
+
+    # mp3 저장 및 전송
+    result_path = os.path.join(tmpdir, "output.mp3")
+    output.export(result_path, format="mp3")
+    return send_file(
+        result_path,
+        as_attachment=True,
+        download_name="echoed.mp3",
+        mimetype="audio/mp3"
+    )
+
+@app.route('/autotune_vocal', methods=['POST'])
+def autotune_vocal():
+    musicid = request.form.get('musicid')
+    if not musicid:
+        return jsonify({'error': 'musicid required'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
+
+    audio_file = request.files['audio']
+
+    # 1. DB에서 pitch_hz 가져오기
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT pitch_vector FROM music_meta WHERE musicid = %s", (musicid,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return jsonify({'error': 'musicid not found in music_meta'}), 404
+
+    pitch_arr_raw = row[0]   # 보통 psycopg2가 float8[]를 list로 변환
+    # None→np.nan
+    pitch_arr = np.array([x if x is not None else np.nan for x in pitch_arr_raw], dtype=float)
+
+    # 2. 임시 저장 및 오디오 로드
+    tmpdir = tempfile.mkdtemp()
+    audio_path = os.path.join(tmpdir, 'input.mp3')
+    audio_file.save(audio_path)
+    y, sr = librosa.load(audio_path, sr=22050)
+
+    # 3. 길이 맞춰 자르기
+    frame_length = 2048
+    hop_length = frame_length // 4
+    n_frames = int((len(y) - frame_length) // hop_length) + 1
+    target_pitch = pitch_arr[:n_frames]
+    y = y[:(n_frames * hop_length + frame_length)]
+
+    # 4. 오토튠
+    fmin = librosa.note_to_hz('C2')
+    fmax = librosa.note_to_hz('C7')
+    y_tuned = psola.vocode(y, sample_rate=sr, target_pitch=target_pitch, fmin=fmin, fmax=fmax)
+
+    # 5. 결과 저장/반환
+    tuned_wav_path = os.path.join(tmpdir, "tuned.wav")
+    tuned_mp3_path = os.path.join(tmpdir, "tuned.mp3")
+    sf.write(tuned_wav_path, y_tuned, sr)
+    AudioSegment.from_wav(tuned_wav_path).export(tuned_mp3_path, format="mp3")
+
+    return send_file(
+        tuned_mp3_path,
+        as_attachment=True,
+        download_name="tuned_vocal.mp3",
+        mimetype="audio/mp3"
+    )
 
 
     

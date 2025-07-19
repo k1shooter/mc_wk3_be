@@ -37,7 +37,7 @@ def analyze_audio(audio_path):
     }
 
 # Step 3. 결과 저장 (기준 JSON)
-def save_as_json(data, filename='song_profile.json'):
+def save_as_json(data, filename='hurtroadvocal.json'):
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     print(f"[저장 완료] 기준 데이터 → {filename}")
@@ -72,6 +72,7 @@ def plot_pitch_onset(audio_path, result):
 # 사용법 예시
 if __name__ == '__main__':
     # analysis_data = analyze_audio('audio.wav')
-    # save_as_json(analysis_data)
-    analysis_data = analyze_audio('audio/vocals.wav')
-    plot_pitch_onset('audio/vocals.wav', analysis_data)
+    
+    analysis_data = analyze_audio('outputs/ed74f3d9-4701-4bfb-804e-98af5e82b1eb/vocals.mp3')
+    save_as_json(analysis_data)
+    # plot_pitch_onset('audio/vocals.wav', analysis_data)
