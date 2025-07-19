@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS musics (
     musicid VARCHAR(255) NOT NULL PRIMARY KEY,
-    title VARCHAR(255) NOT NULL,
+    title VARCHAR(255),
     artist VARCHAR(100),
     accompaniment_path VARCHAR(300),
     created_at TIMESTAMP DEFAULT NOW()
