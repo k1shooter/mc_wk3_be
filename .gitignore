@@ -19,7 +19,7 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
-
+.env
 outputs/
 uploads/
 # 모델 및 데이터

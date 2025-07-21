@@ -1,5 +1,5 @@
 
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, send_from_directory
 import os
 from spleeter.separator import Separator
 from werkzeug.utils import secure_filename
@@ -17,17 +17,104 @@ import tempfile
 import psola
 import soundfile as sf
 from flask_cors import CORS, cross_origin
+import math
+import matplotlib.pyplot as plt
+from dotenv import load_dotenv
+from googleapiclient.discovery import build
+import whisper
+import subprocess
+import sys
+import zipfile
+import json
+
+load_dotenv()
+api_key = os.getenv("API_KEY")
 
 app=Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins" : "*"}})
 app.debug=True
+gpuserver="http://172.20.12.17:80"
+# def set_oom_score_adj(value: int):
+#     """
+#     현재 프로세스의 oom_score_adj 값을 변경합니다.
+#     value: -1000(절대 종료 금지) ~ +1000(우선 킬) 범위
+#     """
+#     path = "/proc/self/oom_score_adj"
+#     try:
+#         with open(path, "w") as f:
+#             f.write(str(value))
+#         print(f"OOM_SCORE_ADJ 설정 완료: {value}")
+#     except Exception as e:
+#         print(f"OOM_SCORE_ADJ 설정 실패: {e}")
+
+# set_oom_score_adj(-1000)
+def get_pitch_feedback(user_feature, singer_feature):
+    # Flask 서버 주소와 포트(자기 자신, 혹은 네트워크 주소)
+    # 로컬 서버 구동 중이면 이렇게:
+    api_url = "http://172.20.12.17:80/llm_pitch_feedback"
+    # 만약 Docker나 외부 서버면 실제 주소로 교체
+
+    payload = {
+        "user_feature": user_feature,
+        "singer_feature": singer_feature
+    }
+
+    try:
+        resp = requests.post(api_url, json=payload)
+        resp.raise_for_status()
+        result = resp.json()
+        return result.get("feedback")
+    except Exception as e:
+        # 오류시 None이나 대신 에러 메시지 반환
+        return f"Error: {e}"
+    
+def send_to_separation_api(input_path, save_dir):
+    """
+    input_path: 분리할 원본 오디오 파일
+    save_dir: zip의 결과를 풀 디렉토리(outputs/<uuid>/)
+    """
+    url = gpuserver+'/separate'
+    
+    # 1. POST로 분리 요청 (파일 업로드)
+    with open(input_path, 'rb') as f:
+        response = requests.post(url, files={'audio': (os.path.basename(input_path), f)})
+    
+    if response.status_code != 200 or not response.content:
+        raise Exception('분리 API 호출 실패 or 결과 없음')
+    
+    # 2. zip 임시 저장
+    zip_tmp_path = os.path.join(save_dir, 'separated.zip')
+    with open(zip_tmp_path, 'wb') as f:
+        f.write(response.content)
+    
+    # 3. 압축 해제
+    with zipfile.ZipFile(zip_tmp_path, 'r') as zip_ref:
+        zip_ref.extractall(save_dir)
+
+    os.remove(zip_tmp_path)  # zip파일 삭제
+
+    # 4. 경로 return (vocals.wav, accompaniment.wav 등)
+    vocals_path = os.path.join(save_dir, 'vocals.wav')
+    accomp_path = os.path.join(save_dir, 'accompaniment.wav')
+    return vocals_path, accomp_path
+
+def analyze_audio_via_gpu_api(file_path, gpu_api_url=gpuserver+"/analyze"):
+    import requests
+    with open(file_path, 'rb') as f:
+        res = requests.post(gpu_api_url, files={'audio': (os.path.basename(file_path), f)})
+    if res.status_code == 200:
+        return res.json()
+    else:
+        raise Exception(f'GPU analyze API 오류: {res.status_code}, {res.text}')
+    
+
 
 #유튜브 영상 다운(지정 폴더 안에 mp3 형식으로로)
 def download_audio_with_ytdlp(youtube_url, filename, folder):
     ydl_opts = {
         'format': 'bestaudio/best',  # 최고 품질의 오디오 형식 지정
         'extractaudio': True,  # 오디오만 추출
-        'audioformat': 'wav',  # 오디오 형식을 wav로 지정
+        'audioformat': 'mp3',  # 오디오 형식을 wav로 지정
         'outtmpl': os.path.join(folder, f'{filename}.%(ext)s'),
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',  # FFmpeg을 사용하여 오디오 추출
@@ -42,37 +129,17 @@ def download_audio_with_ytdlp(youtube_url, filename, folder):
         file_name = ydl.prepare_filename(info_dict).replace('.webm', '.mp3')  # 파일 이름을 wav로 변경
     return file_name  # 파일 이름 반환
 
-#mp3 파일 분석, onset이랑 pitch
-def analyze_audio(audio_path):
-    y, sr = librosa.load(audio_path, sr=22050)
 
-    # 음정 추출
-    print(f"[분석 중] 음정 추출")
-    f0, voiced_flag, _ = librosa.pyin(
-        y, 
-        fmin=librosa.note_to_hz('C2'),
-        fmax=librosa.note_to_hz('C7')
-    )
 
-    # 박자 추출
-    print(f"[분석 중] 박자 추출")
-    onset_frames = librosa.onset.onset_detect(y=y, sr=sr)
-    onset_times = librosa.frames_to_time(onset_frames, sr=sr).tolist()  # <=== 리스트로 변환
+NOTE_NAMES = ["도", "도#", "레", "레#", "미", "파", "파#", "솔", "솔#", "라", "라#", "시"]
 
-    # # 템포 추정
-    # print(f"[분석 중] 템포 추정")
-    # tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    # tempo = float(np.array(tempo))  # 명시적 float 처리
-
-    # print(f"[분석 완료] 평균 템포: {tempo:.2f} BPM")
-
-    return {
-        "sample_rate": int(sr),
-        "pitch_hz": [float(p) if p is not None and not np.isnan(p) else None for p in f0],  # NaN 제거 + float 변환
-        "onset_times": onset_times,
-        # "tempo_bpm": tempo
-    }
-
+def hz_to_note_name(hz):
+    if hz is None or hz <= 0:
+        return None
+    midi_num = round(69 + 12 * math.log2(hz / 440))
+    octave = (midi_num // 12) - 1
+    name = NOTE_NAMES[midi_num % 12]
+    return f"{name}{octave}"
 
 @app.route("/")
 def index():
@@ -96,7 +163,6 @@ separator = Separator('spleeter:2stems')
 
 
 
-
 @app.route('/accompaniment', methods=['POST'])
 @cross_origin(origin='http://localhost:3000')
 def accompaniment_only():
@@ -116,47 +182,39 @@ def accompaniment_only():
     # 3. outputs/uuid 폴더 생성 후 분리
     output_dir = os.path.join(app.config['OUTPUT_FOLDER'], musicid)
     os.makedirs(output_dir, exist_ok=True)
-    separator.separate_to_file(input_path, output_dir)
+    vocals_path, accomp_path = send_to_separation_api(input_path, output_dir)
 
-    # 분리툴이 실제로 결과를 출력하는 위치: outputs/uuid/uuid 폴더  
-    actual_dir = os.path.join(output_dir, musicid)   # outputs/uuid/uuid
 
-    # 파일들을 상위로 이동
-    accomp_wav_src = os.path.join(actual_dir, 'accompaniment.wav')
-    vocals_wav_src = os.path.join(actual_dir, 'vocals.wav')
-    accomp_wav_dst = os.path.join(output_dir, 'accompaniment.wav')
-    vocals_wav_dst = os.path.join(output_dir, 'vocals.wav')
+    accomp_mp3 = accomp_path.replace('.wav', '.mp3')
+    vocals_mp3 = vocals_path.replace('.wav', '.mp3')
 
-    if os.path.exists(accomp_wav_src):
-        shutil.move(accomp_wav_src, accomp_wav_dst)
-    if os.path.exists(vocals_wav_src):
-        shutil.move(vocals_wav_src, vocals_wav_dst)
-    # (필요시 기타 stem도 이동)
+    if not os.path.exists(accomp_mp3) and os.path.exists(accomp_path):
+        AudioSegment.from_wav(accomp_path).export(accomp_mp3, format="mp3")
+    if not os.path.exists(vocals_mp3) and os.path.exists(vocals_path):
+        AudioSegment.from_wav(vocals_path).export(vocals_mp3, format="mp3")
 
-    # 중간 디렉토리 정리
-    if os.path.exists(actual_dir):
-        shutil.rmtree(actual_dir)
-
-    # 이후부턴 항상 outputs/uuid/ 바로 밑에서 파일 처리 가능!
-    accomp_wav= os.path.join(output_dir, 'accompaniment.wav')
-    vocals_wav = os.path.join(output_dir, 'vocals.wav')
-    accomp_mp3 = os.path.join(output_dir, 'accompaniment.mp3')
-    vocals_mp3 = os.path.join(output_dir, 'vocals.mp3')
-
-    # wav → mp3 변환 (이미 있으면 생략)
-    if not os.path.exists(accomp_mp3) and os.path.exists(accomp_wav_dst):
-        AudioSegment.from_wav(accomp_wav_dst).export(accomp_mp3, format="mp3")
-    if not os.path.exists(vocals_mp3) and os.path.exists(vocals_wav_dst):
-        AudioSegment.from_wav(vocals_wav_dst).export(vocals_mp3, format="mp3")
+    try:
+        if os.path.exists(accomp_path): os.remove(accomp_path)
+        if os.path.exists(vocals_path): os.remove(vocals_path)
+        # if os.path.exists(accomp_mp3):
+        #     os.remove(accomp_mp3)
+        # if os.path.exists(vocals_mp3):
+        #     os.remove(vocals_mp3)
+        # os.remove(audio_dir)
+    except Exception as e:
+        print("삭제 실패:", e)
 
     # DB 처리 등 필요시 추가
-    data=analyze_audio(accomp_mp3)
+    data = analyze_audio_via_gpu_api(
+        vocals_mp3,
+        gpu_api_url=gpuserver+"/analyze"  # 실제 GPU 서버 주소로 바꿔주세요
+    )
     conn = get_conn()
     cur = conn.cursor()
     print(data)
     cur.execute(
-        "INSERT INTO music_meta (musicid, pitch_vector, onset_times) VALUES (%s, %s, %s) RETURNING *",
-        (musicid, data['pitch_hz'], data['onset_times'])
+        "INSERT INTO music_meta (musicid, pitch_vector, onset_times, lyrics) VALUES (%s, %s, %s, %s) RETURNING *",
+        (musicid, data['pitch_hz'], data['onset_times'], json.dumps(data['lyrics']))
     )
     cur.execute("INSERT INTO musics (musicid, accompaniment_path) VALUES (%s, %s) RETURNING *",
         (musicid, accomp_mp3))
@@ -166,18 +224,7 @@ def accompaniment_only():
     cur.close()
     conn.close()
 
-    try:
-        if os.path.exists(accomp_wav):
-            os.remove(accomp_wav)
-        if os.path.exists(vocals_wav):
-            os.remove(vocals_wav)
-        # if os.path.exists(accomp_mp3):
-        #     os.remove(accomp_mp3)
-        # if os.path.exists(vocals_mp3):
-        #     os.remove(vocals_mp3)
-        # os.remove(audio_dir)
-    except Exception as e:
-        print("삭제 실패:", e)
+    
         
     # uuid 반환
     return jsonify({'uuid': musicid}), 200
@@ -188,34 +235,32 @@ def accompaniment_ytlink():
 
     youtube_url = request.form['youtube_url']
 
-
     filename=str(uuid.uuid4())
     file_name = download_audio_with_ytdlp(youtube_url, filename, "uploads/")
     input_path = file_name
 
     # 분리
-    separator.separate_to_file(input_path, "outputs")
+    output_dir = os.path.join("outputs", filename)
+    os.makedirs(output_dir, exist_ok=True)
+    vocals_path, accomp_path = send_to_separation_api(input_path, output_dir)
 
-    base_filename = os.path.basename(file_name)
-    audio_dir = os.path.splitext(os.path.join("outputs", base_filename))[0]
-    accomp_wav = os.path.join(audio_dir, 'accompaniment.wav')
-    accomp_mp3 = os.path.join(audio_dir, 'accompaniment.mp3')
-    vocals_wav = os.path.join(audio_dir, 'vocals.wav')
-    vocals_mp3 = os.path.join(audio_dir, 'vocals.mp3')
+    accomp_mp3 = accomp_path.replace('.wav', '.mp3')
+    vocals_mp3 = vocals_path.replace('.wav', '.mp3')
+    if not os.path.exists(accomp_mp3) and os.path.exists(accomp_path):
+        AudioSegment.from_wav(accomp_path).export(accomp_mp3, format="mp3")
+    if not os.path.exists(vocals_mp3) and os.path.exists(vocals_path):
+        AudioSegment.from_wav(vocals_path).export(vocals_mp3, format="mp3")
 
-    #wav → mp3 변환 (이미 있으면 변환 생략)
-    if not os.path.exists(accomp_mp3) and os.path.exists(accomp_wav):
-        AudioSegment.from_wav(accomp_wav).export(accomp_mp3, format="mp3")
-    if not os.path.exists(vocals_mp3) and os.path.exists(vocals_wav):
-        AudioSegment.from_wav(vocals_wav).export(vocals_mp3, format="mp3")
-
-    data=analyze_audio(accomp_mp3)
+    data = analyze_audio_via_gpu_api(
+        vocals_mp3,
+        gpu_api_url = gpuserver+"/analyze"  # 실제 GPU 서버 주소로 바꿔주세요
+    )
     conn = get_conn()
     cur = conn.cursor()
     print(data)
     cur.execute(
-        "INSERT INTO music_meta (musicid, pitch_vector, onset_times) VALUES (%s, %s, %s) RETURNING *",
-        (filename, data['pitch_hz'], data['onset_times'])
+        "INSERT INTO music_meta (musicid, pitch_vector, onset_times, lyrics) VALUES (%s, %s, %s, %s) RETURNING *",
+        (filename, data['pitch_hz'], data['onset_times'], json.dumps(data['lyrics']))
     )
     cur.execute("INSERT INTO musics (musicid, accompaniment_path) VALUES (%s, %s) RETURNING *",
         (filename, accomp_mp3))
@@ -226,10 +271,10 @@ def accompaniment_ytlink():
     conn.close()
 
     try:
-        if os.path.exists(accomp_wav):
-            os.remove(accomp_wav)
-        if os.path.exists(vocals_wav):
-            os.remove(vocals_wav)
+        if os.path.exists(accomp_path):
+            os.remove(accomp_path)
+        if os.path.exists(vocals_path):
+            os.remove(vocals_path)
         # if os.path.exists(accomp_mp3):
         #     os.remove(accomp_mp3)
         # if os.path.exists(vocals_mp3):
@@ -267,6 +312,7 @@ def patch_music(musicid):
     req_data = request.get_json()
     title = req_data.get('title')
     artist = req_data.get('artist')
+    genre = req_data.get('genre')
 
     if title is None and artist is None:
         return jsonify({'error': '수정할 항목이 없습니다.'}), 400
@@ -281,6 +327,9 @@ def patch_music(musicid):
     if artist is not None:
         fields.append("artist = %s")
         values.append(artist)
+    if artist is not None:
+        fields.append("genre = %s")
+        values.append(genre)
 
     values.append(musicid)  # WHERE 조건
 
@@ -295,7 +344,7 @@ def patch_music(musicid):
         conn.commit()
         if not updated:
             return jsonify({'error': 'Not found'}), 404
-        return jsonify({'musicid': updated[0], 'title': updated[1], 'artist': updated[2]}), 200
+        return jsonify({'musicid': updated[0], 'title': updated[1], 'artist': updated[2], 'genre': updated[3]}), 200
     except Exception as e:
         conn.rollback()
         return jsonify({'error': str(e)}), 500
@@ -387,7 +436,7 @@ def get_music_meta(musicid):
     cur = conn.cursor()
     try:
         cur.execute(
-            'SELECT musicid, pitch_vector, onset_times FROM music_meta WHERE musicid = %s',
+            'SELECT * FROM music_meta WHERE musicid = %s',
             (musicid,)
         )
         row = cur.fetchone()
@@ -396,7 +445,8 @@ def get_music_meta(musicid):
         music_meta = {
             'musicid': row[0],
             'pitch_vector': row[1],   # FLOAT8[] 타입은 psycopg2가 바로 파이썬 리스트로 반환
-            'onset_times': row[2]
+            'onset_times': row[2],
+            'lyrics': row[3]
         }
         return jsonify(music_meta), 200
     except Exception as e:
@@ -405,6 +455,32 @@ def get_music_meta(musicid):
         cur.close()
         conn.close()
         
+
+@app.route('/music_meta_note/<musicid>', methods=['GET'])
+def get_music_meta_note(musicid):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            'SELECT pitch_vector FROM music_meta WHERE musicid = %s',
+            (musicid,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'Not found'}), 404
+        pitch=row[0]
+
+        note_arr = [hz_to_note_name(hz) for hz in pitch]
+
+        return jsonify({'notes': note_arr}), 200
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
 #GET 요청, 파라미터 없음. 현재기준 지니 TOP 50 JSON 반환환
 @app.route('/genie-chart', methods=['GET'])
 def genie_chart():
@@ -414,9 +490,10 @@ def genie_chart():
     url = 'https://www.genie.co.kr/chart/top200?ditc=D&hh=23&rtm=N&pg=1'
     response = requests.get(url, headers=headers)
     soup = BeautifulSoup(response.text, 'html.parser')
+    
 
     music_list = soup.select('#body-content > div.newest-list > div > table > tbody > tr')
-
+    print(music_list)
     result = []
     for music in music_list:
         rank = music.select_one('td.number').text[0:2].strip()
@@ -437,13 +514,14 @@ def add_music():
     data = request.json
     title = data.get('title', 'untitled')
     artist = data.get('artist', 'unknown')
+    genre = data.get('genre', 'unknown')
     music_id=data['musicid']
 
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE musics SET title=%s, artist=%s WHERE musicid=%s RETURNING musicid",
-        (title, artist, music_id)
+        "UPDATE musics SET title=%s, artist=%s, genre=%s WHERE musicid=%s RETURNING musicid",
+        (title, artist, genre, music_id)
     )
     music_id = cur.fetchone()[0]
     conn.commit()
@@ -547,7 +625,7 @@ def autotune_vocal():
 
     # 3. 길이 맞춰 자르기
     frame_length = 2048
-    hop_length = frame_length // 4
+    hop_length = 256
     n_frames = int((len(y) - frame_length) // hop_length) + 1
     target_pitch = pitch_arr[:n_frames]
     y = y[:(n_frames * hop_length + frame_length)]
@@ -570,7 +648,307 @@ def autotune_vocal():
         mimetype="audio/mp3"
     )
 
+@app.route('/ytlink/<query>', methods=['GET'])
+def get_ytlink(query):
+    youtube = build('youtube', 'v3', developerKey=api_key)
 
-    
+    request = youtube.search().list(
+        q=query, part="snippet", type="video", maxResults=1
+    )
+    response = request.execute()
+    video_id = response["items"][0]["id"]["videoId"]
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    return jsonify({'link': url, 'message': 'link is in link!'})
+
+@app.route('/user_record', methods=['POST'])
+def user_record():
+    # 1. 입력값 파싱
+    userid = request.form.get('userid')
+    musicid = request.form.get('musicid')
+    score = request.form.get('score')
+    if not (userid and musicid and score):
+        return jsonify({'error': 'userid, musicid, score required'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'audio file required'}), 400
+
+    audio_file = request.files['audio']
+    try:
+        os.makedirs(os.path.join('records', userid), exist_ok=True)
+        audio_path = os.path.join('records', userid, f"{musicid}.mp3")
+        audio_file.save(audio_path)
+    except Exception as e:
+        return jsonify({'error': f'File save failed: {e}'}), 500
+
+    # 2. pitch_vector, onset_times 분석
+    #data = analyze_audio(audio_path)
+    data = analyze_audio_via_gpu_api(
+        audio_path,
+        gpu_api_url = gpuserver+"/analyze"  # 실제 GPU 서버 주소로 바꿔주세요
+    )
+    # 3. DB 저장
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO user_records (userid, musicid, score, audio_url, pitch_vector, onset_times)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING recordid;
+            """,
+            (
+                userid,
+                musicid,
+                float(score),
+                audio_path,
+                data['pitch_hz'],
+                data['onset_times']
+            )
+        )
+        recordid = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        return jsonify({'error': f'DB insert failed: {e}'}), 500
+
+    return jsonify({
+        'recordid': recordid,
+        'audio_url': audio_path,
+    }), 200
+
+@app.route('/challenge', methods=['POST'])
+def add_challenge():
+    title = request.form.get('title')
+    descript = request.form.get('descript')
+    if not title:
+        return jsonify({'error': 'title required'}), 400
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO challenges (title, descript)
+            VALUES (%s, %s)
+            RETURNING challengeid;
+        """, (title, descript))
+        challengeid = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({'challengeid': challengeid, 'title': title, 'descript': descript}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/user_challenge', methods=['POST'])
+def add_user_challenge():
+    userid = request.form.get('userid')
+    challengeid = request.form.get('challengeid')
+    if not userid or not challengeid:
+        return jsonify({'error': 'userid and challengeid required'}), 400
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO user_challenges (userid, challengeid)
+            VALUES (%s, %s)
+            RETURNING usrchalid;
+        """, (userid, challengeid))
+        usrchalid = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({'usrchalid': usrchalid, 'userid': userid, 'challengeid': challengeid}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/lyrics/<musicid>', methods=['GET'])
+def get_lyrics(musicid):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT lyrics FROM music_meta WHERE musicid = %s", (musicid,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    if not row or not row[0]:
+        return jsonify({'error': f'lyrics for musicid {musicid} not found'}), 404
+
+    return jsonify({'musicid': musicid, 'lyrics': row[0]})
+
+
+
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+@app.route('/upload', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
+def upload_file():
+    if 'file' not in request.files or 'userid' not in request.form:
+        return jsonify({'error': 'No file or userid'}), 400
+
+    file = request.files['file']
+    userid = request.form['userid']
+
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'File type not allowed'}), 400
+
+    # 확장자 추출 후 <userid>.<확장자>로 저장
+    ext = secure_filename(file.filename).rsplit('.', 1)[1].lower()
+    filename = f'{secure_filename(userid)}.{ext}'
+    user_dir = 'users'
+    os.makedirs(user_dir, exist_ok=True)
+    filepath = os.path.join(user_dir, filename)
+
+    # 같은 이름의 파일이 있으면 덮어쓰기
+    file.save(filepath)
+    profile_url = f'{user_dir}/{filename}'
+
+    return jsonify({'profile_url': profile_url})
+
+
+
+@app.route('/profile/<userid>', methods=['GET'])
+def get_profile(userid):
+    user_dir = 'users'
+    # 지원 확장자 순회하며 파일 탐색
+    for ext in ALLOWED_EXTENSIONS:
+        filename = f"{secure_filename(userid)}.{ext}"
+        filepath = os.path.join(user_dir, filename)
+        if os.path.exists(filepath):
+            # send_from_directory로 이미지 반환
+            return send_from_directory(user_dir, filename)
+    # 파일이 없으면 404
+    return jsonify({'error': 'No profile image found for this user'}), 404
+
+@app.route('/check_userid', methods=['POST'])
+def check_userid():
+    req_data = request.get_json()
+    userid = req_data.get('userid')
+    if not userid:
+        return jsonify({"error": "userid not provided"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE userid = %s", (userid,))
+    exists = cur.fetchone() is not None
+    cur.close()
+    conn.close()
+
+    return jsonify({
+        "userid": userid,
+        "exists": exists  # True(이미 있음) / False(사용 가능)
+    })
+
+def process_voice_features(pitch_vector):
+    # None/NaN이나 0이 아닌 값만 남김
+    pitch_valid = np.array([f for f in pitch_vector if f is not None and not np.isnan(f) and f > 0])
+    if len(pitch_valid) == 0:
+        return None
+
+    # 기본 통계
+    pitch_mean = float(np.mean(pitch_valid))
+    pitch_std = float(np.std(pitch_valid))
+
+    # jitter (평소대를 기준으로 프레임별 차이의 평균)
+    if len(pitch_valid) > 1:
+        diffs = np.abs(np.diff(pitch_valid))
+        jitter_percent = float(np.mean(diffs / pitch_valid[:-1])) * 100
+    else:
+        jitter_percent = 0.0
+
+    # voiced_ratio (음이 검출된 프레임 비율, 전체 벡터 중 not None/NaN/0)
+    voiced_ratio = float(len(pitch_valid) / len(pitch_vector))
+
+    return {
+        "pitch_mean": pitch_mean,
+        "pitch_std": pitch_std,
+        "voiced_ratio": voiced_ratio,
+        "jitter_percent": jitter_percent
+    }
+
+@app.route('/vocal_assessment', methods=['POST'])
+def voice_features():
+    data = request.get_json()
+    userid = data.get('userid')
+    musicid = data.get('musicid')
+    if not userid or not musicid:
+        return jsonify({'error': 'userid, musicid required'}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # 가장 최근 user pitch_vector SELECT
+    cur.execute("""
+        SELECT pitch_vector FROM user_records
+        WHERE userid = %s AND musicid = %s
+        ORDER BY created_at DESC LIMIT 1
+    """, (userid, musicid))
+    user_row = cur.fetchone()
+
+    # 가수(원곡) pitch_vector SELECT
+    cur.execute("""
+        SELECT pitch_vector FROM music_meta WHERE musicid = %s
+    """, (musicid,))
+    singer_row = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    if not user_row or not singer_row:
+        return jsonify({'error': 'user 또는 music 데이터 없음'}), 404
+
+    user_pitch = user_row[0]
+    singer_pitch = singer_row[0]
+
+    n = min(len(user_pitch), len(singer_pitch))
+    user_pitch=user_pitch[:n]
+    singer_pitch=singer_pitch[:n]
+
+    # voice feature 계산
+    user_features = process_voice_features(user_pitch)
+    singer_features = process_voice_features(singer_pitch)
+    if user_features is None or singer_features is None:
+        return jsonify({'error': '피치 데이터 부족'}), 400
+    feedback=get_pitch_feedback(user_features,singer_features)
+
+    return jsonify({
+        "feedback": feedback
+    })
+
+@app.route('/search_music', methods=['POST'])
+def search_music():
+    data = request.get_json()
+    title = data.get('title')
+    artist = data.get('artist')
+    if not title or not artist:
+        return jsonify({'error': 'title, artist 필요'}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT musicid, title, artist, genre, accompaniment_path, created_at
+        FROM musics
+        WHERE title = %s AND artist = %s
+        LIMIT 1
+    """, (title, artist))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row:
+        return jsonify({'result': None, 'message': 'No matching music found'}), 404
+
+    keys = ['musicid', 'title', 'artist', 'genre', 'accompaniment_path', 'created_at']
+    music_info = dict(zip(keys, row))
+    return jsonify({'result': music_info})
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=80, debug=True)
