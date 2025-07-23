@@ -17,7 +17,6 @@ CREATE TABLE IF NOT EXISTS musics (
 );
 
 
-
 CREATE TABLE IF NOT EXISTS music_meta (
     musicid VARCHAR(255) NOT NULL PRIMARY KEY,
     pitch_vector FLOAT8[],

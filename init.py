@@ -31,23 +31,11 @@ load_dotenv()
 api_key = os.getenv("API_KEY")
 
 app=Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins" : "*"}})
+CORS(app, resources={r"/api/*": {"origins" : "*"},
+r"/*": {"origins": "*"},})
 app.debug=True
 gpuserver="http://172.20.12.17:80"
-# def set_oom_score_adj(value: int):
-#     """
-#     현재 프로세스의 oom_score_adj 값을 변경합니다.
-#     value: -1000(절대 종료 금지) ~ +1000(우선 킬) 범위
-#     """
-#     path = "/proc/self/oom_score_adj"
-#     try:
-#         with open(path, "w") as f:
-#             f.write(str(value))
-#         print(f"OOM_SCORE_ADJ 설정 완료: {value}")
-#     except Exception as e:
-#         print(f"OOM_SCORE_ADJ 설정 실패: {e}")
 
-# set_oom_score_adj(-1000)
 def get_pitch_feedback(user_feature, singer_feature):
     # Flask 서버 주소와 포트(자기 자신, 혹은 네트워크 주소)
     # 로컬 서버 구동 중이면 이렇게:
@@ -131,15 +119,13 @@ def download_audio_with_ytdlp(youtube_url, filename, folder):
 
 
 
-NOTE_NAMES = ["도", "도#", "레", "레#", "미", "파", "파#", "솔", "솔#", "라", "라#", "시"]
+# NOTE_NAMES = ["도", "도#", "레", "레#", "미", "파", "파#", "솔", "솔#", "라", "라#", "시"]
 
 def hz_to_note_name(hz):
     if hz is None or hz <= 0:
         return None
     midi_num = round(69 + 12 * math.log2(hz / 440))
-    octave = (midi_num // 12) - 1
-    name = NOTE_NAMES[midi_num % 12]
-    return f"{name}{octave}"
+    return midi_num
 
 @app.route("/")
 def index():
@@ -193,16 +179,7 @@ def accompaniment_only():
     if not os.path.exists(vocals_mp3) and os.path.exists(vocals_path):
         AudioSegment.from_wav(vocals_path).export(vocals_mp3, format="mp3")
 
-    try:
-        if os.path.exists(accomp_path): os.remove(accomp_path)
-        if os.path.exists(vocals_path): os.remove(vocals_path)
-        # if os.path.exists(accomp_mp3):
-        #     os.remove(accomp_mp3)
-        # if os.path.exists(vocals_mp3):
-        #     os.remove(vocals_mp3)
-        # os.remove(audio_dir)
-    except Exception as e:
-        print("삭제 실패:", e)
+    
 
     # DB 처리 등 필요시 추가
     data = analyze_audio_via_gpu_api(
@@ -224,6 +201,18 @@ def accompaniment_only():
     cur.close()
     conn.close()
 
+    try:
+        if os.path.exists(accomp_path): os.remove(accomp_path)
+        if os.path.exists(vocals_path): os.remove(vocals_path)
+        if os.path.exists(input_path): os.remove(input_path)
+        if os.path.exists(vocals_mp3): os.remove(vocals_mp3)
+        # if os.path.exists(accomp_mp3):
+        #     os.remove(accomp_mp3)
+        # if os.path.exists(vocals_mp3):
+        #     os.remove(vocals_mp3)
+        # os.remove(audio_dir)
+    except Exception as e:
+        print("삭제 실패:", e)
     
         
     # uuid 반환
@@ -231,6 +220,7 @@ def accompaniment_only():
 
 #post 유튜브 링크 form으로 받음, uuid로 음악 id 정하고 uuid로 반환, musics db에 곡정보없이 들어감, music_meta에 분석결과도 들어감감
 @app.route('/accompaniment_with_ytlink', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def accompaniment_ytlink():
 
     youtube_url = request.form['youtube_url']
@@ -270,11 +260,12 @@ def accompaniment_ytlink():
     cur.close()
     conn.close()
 
+
     try:
-        if os.path.exists(accomp_path):
-            os.remove(accomp_path)
-        if os.path.exists(vocals_path):
-            os.remove(vocals_path)
+        if os.path.exists(accomp_path): os.remove(accomp_path)
+        if os.path.exists(vocals_path): os.remove(vocals_path)
+        if os.path.exists(input_path): os.remove(input_path)
+        if os.path.exists(vocals_mp3): os.remove(vocals_mp3)
         # if os.path.exists(accomp_mp3):
         #     os.remove(accomp_mp3)
         # if os.path.exists(vocals_mp3):
@@ -288,6 +279,7 @@ def accompaniment_ytlink():
 
 #GET으로 uuid 받아서 반주 mp3 줌줌
 @app.route('/get_accompaniment', methods=['GET'])
+@cross_origin(origin='http://localhost:3000')
 def get_accomp():
     musicid = request.args.get('musicid')  # 예: /get_accompaniment?musicid=xxxx-uuid
     if not musicid:
@@ -308,6 +300,7 @@ def get_accomp():
 
 #patch 요청, musicid 받아서 곡정보 수정(제목, 아티스트트)
 @app.route('/musics/<musicid>', methods=['PATCH'])
+@cross_origin(origin='http://localhost:3000')
 def patch_music(musicid):
     req_data = request.get_json()
     title = req_data.get('title')
@@ -354,6 +347,7 @@ def patch_music(musicid):
 
 #patch요청, userid 받아서 유저 정보 수정정
 @app.route('/users/<userid>', methods=['PATCH'])
+@cross_origin(origin='http://localhost:3000')
 def patch_user(userid):
     req = request.get_json()
     nickname = req.get('nickname')
@@ -404,6 +398,7 @@ def patch_user(userid):
 
 #GET 요청, userid 받아서 유저 모든 정보 반환환
 @app.route('/users/<userid>', methods=['GET'])
+@cross_origin(origin='http://localhost:3000')
 def get_user(userid):
     conn = get_conn()
     cur = conn.cursor()
@@ -431,6 +426,7 @@ def get_user(userid):
 
 #GET 요청, musicid 받아서 음악 분석한 결과 반환 (onset, pitch)
 @app.route('/music_meta/<musicid>', methods=['GET'])
+@cross_origin(origin='http://localhost:3000')
 def get_music_meta(musicid):
     conn = get_conn()
     cur = conn.cursor()
@@ -457,6 +453,7 @@ def get_music_meta(musicid):
         
 
 @app.route('/music_meta_note/<musicid>', methods=['GET'])
+@cross_origin(origin='http://localhost:3000')
 def get_music_meta_note(musicid):
     conn = get_conn()
     cur = conn.cursor()
@@ -483,6 +480,7 @@ def get_music_meta_note(musicid):
 
 #GET 요청, 파라미터 없음. 현재기준 지니 TOP 50 JSON 반환환
 @app.route('/genie-chart', methods=['GET'])
+@cross_origin(origin='http://localhost:3000')
 def genie_chart():
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.86 Safari/537.36'
@@ -493,7 +491,7 @@ def genie_chart():
     
 
     music_list = soup.select('#body-content > div.newest-list > div > table > tbody > tr')
-    print(music_list)
+
     result = []
     for music in music_list:
         rank = music.select_one('td.number').text[0:2].strip()
@@ -510,6 +508,7 @@ def genie_chart():
     
 #PATCH 요청, title, artist, musicid 받아서 musics 업데이트트
 @app.route('/edit-music', methods=['PATCH'])
+@cross_origin(origin='http://localhost:3000')
 def add_music():
     data = request.json
     title = data.get('title', 'untitled')
@@ -531,6 +530,7 @@ def add_music():
 
 #POST 요청, userid, passwd, nickname 받아서 users에 유저 추가 
 @app.route('/add-user', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def add_user():
     data = request.json
     userid = data['userid']
@@ -552,6 +552,7 @@ def add_user():
     return jsonify(result)
 
 @app.route('/add_echo', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def add_echo():
     if 'audio' not in request.files:
         return jsonify({'error': 'No audio file provided'}), 400
@@ -594,6 +595,7 @@ def add_echo():
     )
 
 @app.route('/autotune_vocal', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def autotune_vocal():
     musicid = request.form.get('musicid')
     if not musicid:
@@ -649,6 +651,7 @@ def autotune_vocal():
     )
 
 @app.route('/ytlink/<query>', methods=['GET'])
+@cross_origin(origin='http://localhost:3000')
 def get_ytlink(query):
     youtube = build('youtube', 'v3', developerKey=api_key)
 
@@ -661,8 +664,8 @@ def get_ytlink(query):
     return jsonify({'link': url, 'message': 'link is in link!'})
 
 @app.route('/user_record', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def user_record():
-    # 1. 입력값 파싱
     userid = request.form.get('userid')
     musicid = request.form.get('musicid')
     score = request.form.get('score')
@@ -672,20 +675,38 @@ def user_record():
         return jsonify({'error': 'audio file required'}), 400
 
     audio_file = request.files['audio']
-    try:
-        os.makedirs(os.path.join('records', userid), exist_ok=True)
-        audio_path = os.path.join('records', userid, f"{musicid}.mp3")
-        audio_file.save(audio_path)
-    except Exception as e:
-        return jsonify({'error': f'File save failed: {e}'}), 500
 
-    # 2. pitch_vector, onset_times 분석
-    #data = analyze_audio(audio_path)
+    try:
+        # 저장 폴더 생성
+        user_folder = os.path.join('records', userid)
+        os.makedirs(user_folder, exist_ok=True)
+
+        # 임시 webm 파일 저장
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as tmp_webm:
+            webm_path = tmp_webm.name
+            audio_file.save(webm_path)
+
+        # 변환할 mp3 파일 경로
+        mp3_path = os.path.join(user_folder, f"{musicid}.mp3")
+
+        # pydub을 이용해 webm -> mp3 변환
+        audio_segment = AudioSegment.from_file(webm_path, format='webm')
+        audio_segment.export(mp3_path, format='mp3')
+
+        # 변환 후 임시 webm 파일 삭제
+        os.remove(webm_path)
+
+    except Exception as e:
+        return jsonify({'error': f'File conversion failed: {e}'}), 500
+
+    # pitch_vector, onset_times 분석
+    # data = analyze_audio(mp3_path)
     data = analyze_audio_via_gpu_api(
-        audio_path,
-        gpu_api_url = gpuserver+"/analyze"  # 실제 GPU 서버 주소로 바꿔주세요
+        mp3_path,
+        gpu_api_url=gpuserver + "/analyze"  # 실제 GPU 서버 주소
     )
-    # 3. DB 저장
+
+    # DB 저장
     try:
         conn = get_conn()
         cur = conn.cursor()
@@ -693,16 +714,14 @@ def user_record():
             INSERT INTO user_records (userid, musicid, score, audio_url, pitch_vector, onset_times)
             VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING recordid;
-            """,
-            (
-                userid,
-                musicid,
-                float(score),
-                audio_path,
-                data['pitch_hz'],
-                data['onset_times']
-            )
-        )
+        """, (
+            userid,
+            musicid,
+            float(score),
+            mp3_path,
+            data['pitch_hz'],
+            data['onset_times']
+        ))
         recordid = cur.fetchone()[0]
         conn.commit()
         cur.close()
@@ -712,10 +731,11 @@ def user_record():
 
     return jsonify({
         'recordid': recordid,
-        'audio_url': audio_path,
+        'audio_url': mp3_path,
     }), 200
 
 @app.route('/challenge', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def add_challenge():
     title = request.form.get('title')
     descript = request.form.get('descript')
@@ -740,6 +760,7 @@ def add_challenge():
 
 
 @app.route('/user_challenge', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def add_user_challenge():
     userid = request.form.get('userid')
     challengeid = request.form.get('challengeid')
@@ -763,6 +784,7 @@ def add_user_challenge():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/lyrics/<musicid>', methods=['GET'])
+@cross_origin(origin='http://localhost:3000')
 def get_lyrics(musicid):
     try:
         conn = get_conn()
@@ -800,15 +822,26 @@ def upload_file():
     if not allowed_file(file.filename):
         return jsonify({'error': 'File type not allowed'}), 400
 
-    # 확장자 추출 후 <userid>.<확장자>로 저장
-    ext = secure_filename(file.filename).rsplit('.', 1)[1].lower()
-    filename = f'{secure_filename(userid)}.{ext}'
+    # 저장 경로, 폴더 생성
     user_dir = 'users'
     os.makedirs(user_dir, exist_ok=True)
-    filepath = os.path.join(user_dir, filename)
 
-    # 같은 이름의 파일이 있으면 덮어쓰기
+    # 확장자 추출
+    ext = secure_filename(file.filename).rsplit('.', 1)[1].lower()
+
+    # userid에 해당하는 기존 파일 모두 삭제 (다른 확장자 포함)
+    for existing_file in os.listdir(user_dir):
+        if existing_file.startswith(secure_filename(userid) + '.'):
+            try:
+                os.remove(os.path.join(user_dir, existing_file))
+            except Exception as e:
+                print(f'파일 삭제 실패: {existing_file}, 에러: {e}')
+
+    # 새 파일 저장
+    filename = f'{secure_filename(userid)}.{ext}'
+    filepath = os.path.join(user_dir, filename)
     file.save(filepath)
+
     profile_url = f'{user_dir}/{filename}'
 
     return jsonify({'profile_url': profile_url})
@@ -816,6 +849,7 @@ def upload_file():
 
 
 @app.route('/profile/<userid>', methods=['GET'])
+@cross_origin(origin='http://localhost:3000')
 def get_profile(userid):
     user_dir = 'users'
     # 지원 확장자 순회하며 파일 탐색
@@ -829,6 +863,7 @@ def get_profile(userid):
     return jsonify({'error': 'No profile image found for this user'}), 404
 
 @app.route('/check_userid', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def check_userid():
     req_data = request.get_json()
     userid = req_data.get('userid')
@@ -875,6 +910,7 @@ def process_voice_features(pitch_vector):
     }
 
 @app.route('/vocal_assessment', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def voice_features():
     data = request.get_json()
     userid = data.get('userid')
@@ -924,6 +960,7 @@ def voice_features():
     })
 
 @app.route('/search_music', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
 def search_music():
     data = request.get_json()
     title = data.get('title')
@@ -950,5 +987,204 @@ def search_music():
     music_info = dict(zip(keys, row))
     return jsonify({'result': music_info})
 
+@app.route('/user_record_info', methods=['POST'])
+def get_user_record_info():
+    data = request.get_json()
+    userid = data.get('userid')
+    musicid = data.get('musicid')
+    if not userid or not musicid:
+        return jsonify({'error': 'userid, musicid required'}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT recordid, userid, musicid, score, audio_url, pitch_vector, onset_times, created_at
+        FROM user_records
+        WHERE userid = %s AND musicid = %s
+    """, (userid, musicid))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row:
+        return jsonify({'error': '해당 데이터 없음'}), 404
+
+    keys = ['recordid', 'userid', 'musicid', 'score', 'audio_url', 'pitch_vector', 'onset_times', 'created_at']
+    record = dict(zip(keys, row))
+    return jsonify(record)
+
+@app.route('/userid_record_info', methods=['POST'])
+def get_userid_record_info():
+    data = request.get_json()
+    userid = data.get('userid')
+    if not userid:
+        return jsonify({'error': 'userid required'}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT 
+          ur.recordid, ur.userid, ur.musicid, ur.score, ur.audio_url, 
+          ur.pitch_vector, ur.onset_times, ur.created_at,
+          m.title, m.artist
+        FROM user_records ur
+        LEFT JOIN musics m ON ur.musicid = m.musicid
+        WHERE ur.userid = %s
+        ORDER BY ur.created_at DESC
+    """, (userid,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return jsonify({'error': '해당 데이터 없음'}), 404
+
+    keys = ['recordid', 'userid', 'musicid', 'score', 'audio_url', 'pitch_vector', 'onset_times', 'created_at', 'title', 'artist']
+    records = [dict(zip(keys, row)) for row in rows]
+    return jsonify(records)
+
+
+@app.route('/user_record_update', methods=['POST'])
+def update_user_record():
+    data = request.get_json()
+    userid     = data.get('userid')
+    musicid    = data.get('musicid')
+    score      = data.get('score')
+    audio_url  = data.get('audio_url')
+    pitch_vector = data.get('pitch_vector')
+    onset_times  = data.get('onset_times')
+
+    if not userid or not musicid:
+        return jsonify({'error': 'userid, musicid required'}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT recordid FROM user_records WHERE userid = %s AND musicid = %s
+    """, (userid, musicid))
+    exists = cur.fetchone()
+    if not exists:
+        cur.close()
+        conn.close()
+        return jsonify({'error': '해당 데이터 없음'}), 404
+
+    # 필요한 컬럼만 업데이트 (원하는 필드만 업데이트 할 수도 있음)
+    cur.execute("""
+        UPDATE user_records
+        SET score = %s,
+            audio_url = %s,
+            pitch_vector = %s,
+            onset_times = %s
+        WHERE userid = %s AND musicid = %s
+    """, (
+        score, audio_url, pitch_vector, onset_times, userid, musicid
+    ))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return jsonify({'result': '수정 완료'})
+
+@app.route('/ranks/<musicid>', methods=['GET'])
+def get_records_by_musicid(musicid):
+    conn = get_conn()
+    cur = conn.cursor()
+    query = """
+        SELECT
+            RANK() OVER (ORDER BY score DESC) AS ranking,
+            recordid,
+            userid,
+            musicid,
+            score,
+            audio_url,
+            pitch_vector,
+            onset_times,
+            created_at
+        FROM
+            user_records
+        WHERE
+            musicid = %s
+        ORDER BY
+            score DESC
+    """
+    cur.execute(query, (musicid,))
+    rows = cur.fetchall()
+    columns = [desc[0] for desc in cur.description]
+    results = [dict(zip(columns, row)) for row in rows]
+    cur.close()
+    conn.close()
+    return jsonify(results)
+
+@app.route('/login', methods=['POST'])
+@cross_origin(origin='http://localhost:3000')
+def login():
+    data = request.get_json()
+    userid = data.get('userid')
+    passwd = data.get('passwd')
+
+    if not userid or not passwd:
+        return jsonify({'error': 'userid and passwd required'}), 400
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # 사용자 조회
+        cur.execute("SELECT passwd, nickname, profile_url FROM users WHERE userid = %s", (userid,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            return jsonify({'error': 'Invalid userid or password'}), 401
+        
+        db_passwd = row[0]  # DB에 저장된 암호화된 비밀번호 or 평문
+        nickname = row[1]
+        profile_url = row[2]
+
+        #1) 만약 passwd가 평문이라면 단순 비교
+        if passwd != db_passwd:
+            return jsonify({'error': 'Invalid userid or password'}), 401
+
+
+        # 로그인 성공 응답 예
+        return jsonify({
+            'userid': userid,
+            'nickname': nickname,
+            'profile_url': profile_url,
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/all_musics', methods=['GET'])
+def get_all_musics():
+    try:
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM musics')
+        musics = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return jsonify(musics)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/musics/search', methods=['GET'])
+def search_musics_by_title():
+    title = request.args.get('title', default='', type=str)
+    if not title:
+        return jsonify({'error': 'title query parameter is required!'}), 400
+    try:
+        conn = get_conn()
+        cursor = conn.cursor()
+        # LIKE 검색 (부분일치)
+        cursor.execute("SELECT * FROM musics WHERE title LIKE %s", (f'%{title}%',))
+        musics = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return jsonify(musics)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=80, debug=True)
