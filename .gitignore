@@ -22,6 +22,8 @@ var/
 .env
 outputs/
 uploads/
+records/
+users/
 # 모델 및 데이터
 pretrained_models/
 *.h5
